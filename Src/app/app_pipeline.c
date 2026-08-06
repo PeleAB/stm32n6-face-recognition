@@ -558,6 +558,11 @@ face_gallery_status_t app_pipeline_gallery_commit(void)
   return st;
 }
 
+void app_pipeline_gallery_cancel(void)
+{
+  FaceGallery_CancelEnrollment();
+}
+
 face_gallery_status_t app_pipeline_gallery_clear(void)
 {
   xSemaphoreTake(s_inference_mutex, portMAX_DELAY);

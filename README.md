@@ -222,6 +222,14 @@ when no selection is supplied by a non-CMake build system. The LCD build sends
 camera frames and the same detection/recognition HUD directly to the board's
 LTDC display and does not initialize USB video streaming.
 
+In LCD mode, tap **GALLERY** in the top-right corner to manage identities
+without a host computer. **NEW PERSON** opens an on-screen keyboard; enter a
+name, tap **START**, and keep one face in view while the sample counter fills.
+After at least five samples, tap **COMMIT** to save the identity to the
+persistent gallery. The same screen can delete one identity or clear the full
+gallery. Camera enrollment uses eight samples when available; PC-photo import
+remains a React/Electron viewer feature in UVC mode.
+
 #### STM32CubeIDE
 
 Double-click on `STM32CubeIDE/.project` to open the project in STM32CubeIDE. Build and run using the build and run buttons.

@@ -33,6 +33,7 @@ void FaceGallery_Init(void);
 face_gallery_status_t FaceGallery_StartEnrollment(const char *name, uint8_t name_len);
 void FaceGallery_OfferEmbedding(const float *embedding);
 face_gallery_status_t FaceGallery_Commit(void);
+void FaceGallery_CancelEnrollment(void);
 face_gallery_status_t FaceGallery_ImportQ7(const char *name, uint8_t name_len,
                                            const int8_t *embedding);
 face_gallery_status_t FaceGallery_Clear(void);

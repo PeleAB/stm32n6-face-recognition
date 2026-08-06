@@ -25,6 +25,7 @@
 #include "FreeRTOS.h"
 #include "app/app.h"
 #include "app/app_config.h"
+#include "app/app_pipeline.h"
 #include "app_postprocess.h"
 #include "semphr.h"
 #include "stm32n6570_discovery.h"
@@ -39,6 +40,7 @@
 #include "uvcl.h"
 #else
 #include "stm32n6570_discovery_lcd.h"
+#include "stm32n6570_discovery_bus.h"
 #endif
 #include "task.h"
 #include "utils.h"
@@ -77,11 +79,432 @@ static int force_intra;
 static uint8_t venc_out_buffer[VENC_OUT_BUFFER_SIZE] ALIGN_32 UNCACHED;
 #else
 #define LCD_FRAME_BUFFER_COUNT 2
+#define GT911_ADDRESS_PRIMARY  0xBAU
+#define GT911_ADDRESS_SECONDARY 0x28U
+#define GT911_STATUS_REG       0x814EU
+#define GT911_POINT1_REG       0x8150U
+#define UI_COLOR_PANEL         0xff101820U
+#define UI_COLOR_PANEL_ALT     0xff1b2735U
+#define UI_COLOR_PRIMARY       0xff1688d4U
+#define UI_COLOR_DANGER        0xffc43d4bU
+#define UI_COLOR_DISABLED      0xff4a5563U
+#define UI_COLOR_TEXT          0xffffffffU
+#define UI_COLOR_MUTED         0xffa9b6c5U
+
+typedef enum {
+  LCD_UI_CAMERA = 0,
+  LCD_UI_GALLERY,
+  LCD_UI_KEYBOARD,
+  LCD_UI_ENROLLING,
+  LCD_UI_CONFIRM_DELETE,
+  LCD_UI_CONFIRM_CLEAR,
+} lcd_ui_page_t;
+
 static int lcd_is_active;
 static unsigned int lcd_write_index;
 static uint8_t lcd_frame_buffer[LCD_FRAME_BUFFER_COUNT]
                                [LCD_DISPLAY_WIDTH * LCD_DISPLAY_HEIGHT * CAPTURE_BPP]
                                ALIGN_32 IN_PSRAM;
+static int lcd_touch_available;
+static int lcd_touch_latched;
+static uint16_t lcd_touch_address;
+static lcd_ui_page_t lcd_ui_page;
+static uint8_t lcd_ui_delete_slot;
+static char lcd_ui_name[FACE_GALLERY_NAME_MAX + 1];
+static uint8_t lcd_ui_name_len;
+static char lcd_ui_message[40];
+#endif
+
+#if defined(APP_OUTPUT_LCD)
+static int point_in(int px, int py, int x, int y, int w, int h)
+{
+  return px >= x && px < x + w && py >= y && py < y + h;
+}
+
+static void ui_message(const char *message)
+{
+  strncpy(lcd_ui_message, message, sizeof(lcd_ui_message) - 1U);
+  lcd_ui_message[sizeof(lcd_ui_message) - 1U] = '\0';
+}
+
+static void draw_button(uint8_t *buffer, int x, int y, int w, int h,
+                        const char *label, uint32_t color, int enabled)
+{
+  uint32_t fill = enabled ? color : UI_COLOR_DISABLED;
+  int text_w = (int)strlen(label) * CONF_LEVEL_FONT.width;
+  int text_x = x + MAX(6, (w - text_w) / 2);
+  int text_y = y + (h - CONF_LEVEL_FONT.height) / 2;
+
+  DRAW_FillArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, x, y, w, h, fill);
+  DRAW_RectArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, x, y, w, h,
+                  UI_COLOR_TEXT);
+  DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                    text_x, text_y, "%s", label);
+}
+
+static void lcd_touch_init(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOQ_CLK_ENABLE();
+
+  /* Select the GT911 0x5d address: INT low while reset is released. The LCD
+   * and touch controller share PE1 reset, so perform this before LCD init. */
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  gpio.Pin = GPIO_PIN_4;
+  HAL_GPIO_Init(GPIOQ, &gpio);
+  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_4, GPIO_PIN_RESET);
+
+  gpio.Pin = GPIO_PIN_1;
+  HAL_GPIO_Init(GPIOE, &gpio);
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+  HAL_Delay(12);
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);
+  HAL_Delay(8);
+
+  gpio.Mode = GPIO_MODE_INPUT;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Pin = GPIO_PIN_4;
+  HAL_GPIO_Init(GPIOQ, &gpio);
+  HAL_Delay(50);
+
+  if (BSP_I2C2_Init() != BSP_ERROR_NONE)
+    return;
+  if (BSP_I2C2_IsReady(GT911_ADDRESS_PRIMARY, 3) == BSP_ERROR_NONE) {
+    lcd_touch_address = GT911_ADDRESS_PRIMARY;
+    lcd_touch_available = 1;
+  } else if (BSP_I2C2_IsReady(GT911_ADDRESS_SECONDARY, 3) == BSP_ERROR_NONE) {
+    lcd_touch_address = GT911_ADDRESS_SECONDARY;
+    lcd_touch_available = 1;
+  }
+}
+
+static int lcd_touch_get_tap(int *x, int *y)
+{
+  uint8_t status;
+  uint8_t point[4];
+  uint8_t clear = 0;
+  uint32_t raw_x;
+  uint32_t raw_y;
+
+  if (!lcd_touch_available)
+    return 0;
+  if (BSP_I2C2_ReadReg16(lcd_touch_address, GT911_STATUS_REG, &status, 1) !=
+      BSP_ERROR_NONE)
+    return 0;
+  if ((status & 0x80U) == 0U)
+    return 0;
+
+  if ((status & 0x0fU) == 0U) {
+    lcd_touch_latched = 0;
+    (void)BSP_I2C2_WriteReg16(lcd_touch_address, GT911_STATUS_REG, &clear, 1);
+    return 0;
+  }
+
+  if (BSP_I2C2_ReadReg16(lcd_touch_address, GT911_POINT1_REG, point,
+                         sizeof(point)) != BSP_ERROR_NONE)
+    return 0;
+  (void)BSP_I2C2_WriteReg16(lcd_touch_address, GT911_STATUS_REG, &clear, 1);
+
+  if (lcd_touch_latched)
+    return 0;
+  lcd_touch_latched = 1;
+  raw_x = (uint32_t)point[0] | ((uint32_t)point[1] << 8);
+  raw_y = (uint32_t)point[2] | ((uint32_t)point[3] << 8);
+  *x = (int)MIN(raw_x, LCD_DISPLAY_WIDTH - 1U);
+  *y = (int)MIN(raw_y, LCD_DISPLAY_HEIGHT - 1U);
+  return 1;
+}
+
+static const char *gallery_error(face_gallery_status_t status)
+{
+  switch (status) {
+  case FACE_GALLERY_OK: return "Saved";
+  case FACE_GALLERY_ERR_NAME: return "Invalid name";
+  case FACE_GALLERY_ERR_BUSY: return "Enrollment busy";
+  case FACE_GALLERY_ERR_SAMPLES: return "Need more face samples";
+  case FACE_GALLERY_ERR_FULL: return "Gallery is full";
+  case FACE_GALLERY_ERR_FLASH: return "Flash write failed";
+  case FACE_GALLERY_ERR_SLOT: return "Entry no longer exists";
+  default: return "Gallery error";
+  }
+}
+
+static void lcd_ui_handle_gallery_tap(int x, int y)
+{
+  int row_y = 142;
+
+  if (point_in(x, y, 650, 42, 90, 42)) {
+    lcd_ui_page = LCD_UI_CAMERA;
+    return;
+  }
+  if (FaceGallery_Count() < FACE_GALLERY_MAX_ENTRIES &&
+      point_in(x, y, 70, 90, 190, 42)) {
+    memset(lcd_ui_name, 0, sizeof(lcd_ui_name));
+    lcd_ui_name_len = 0;
+    ui_message("");
+    lcd_ui_page = LCD_UI_KEYBOARD;
+    return;
+  }
+  if (FaceGallery_Count() > 0 && point_in(x, y, 280, 90, 190, 42)) {
+    lcd_ui_page = LCD_UI_CONFIRM_CLEAR;
+    return;
+  }
+
+  for (uint8_t slot = 0; slot < FACE_GALLERY_MAX_ENTRIES; slot++) {
+    char name[FACE_GALLERY_NAME_MAX + 1];
+    if (FaceGallery_GetName(slot, name, sizeof(name)) != 0)
+      continue;
+    if (point_in(x, y, 600, row_y, 120, 34)) {
+      lcd_ui_delete_slot = slot;
+      lcd_ui_page = LCD_UI_CONFIRM_DELETE;
+      return;
+    }
+    row_y += 38;
+  }
+}
+
+static void lcd_ui_handle_keyboard_tap(int x, int y)
+{
+  static const char *rows[] = {
+    "ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ0123", "456789-_."
+  };
+  static const int row_y[] = {120, 178, 236, 294};
+
+  for (unsigned int row = 0; row < ARRAY_NB(rows); row++) {
+    int count = (int)strlen(rows[row]);
+    int start_x = (LCD_DISPLAY_WIDTH - count * 62) / 2;
+    for (int col = 0; col < count; col++) {
+      if (point_in(x, y, start_x + col * 62, row_y[row], 56, 48)) {
+        if (lcd_ui_name_len < FACE_GALLERY_NAME_MAX) {
+          lcd_ui_name[lcd_ui_name_len++] = rows[row][col];
+          lcd_ui_name[lcd_ui_name_len] = '\0';
+        }
+        return;
+      }
+    }
+  }
+
+  if (point_in(x, y, 70, 400, 150, 46)) {
+    lcd_ui_page = LCD_UI_GALLERY;
+  } else if (point_in(x, y, 250, 400, 150, 46)) {
+    if (lcd_ui_name_len > 0)
+      lcd_ui_name[--lcd_ui_name_len] = '\0';
+  } else if (point_in(x, y, 570, 400, 160, 46) && lcd_ui_name_len > 0) {
+    face_gallery_status_t st = FaceGallery_StartEnrollment(lcd_ui_name,
+                                                            lcd_ui_name_len);
+    ui_message(st == FACE_GALLERY_OK ? "Look at the camera alone" :
+                                      gallery_error(st));
+    if (st == FACE_GALLERY_OK)
+      lcd_ui_page = LCD_UI_ENROLLING;
+  }
+}
+
+static void lcd_ui_handle_tap(int x, int y)
+{
+  face_gallery_enroll_status_t status;
+  face_gallery_status_t result;
+
+  switch (lcd_ui_page) {
+  case LCD_UI_CAMERA:
+    if (point_in(x, y, 650, 16, 134, 44))
+      lcd_ui_page = LCD_UI_GALLERY;
+    break;
+  case LCD_UI_GALLERY:
+    lcd_ui_handle_gallery_tap(x, y);
+    break;
+  case LCD_UI_KEYBOARD:
+    lcd_ui_handle_keyboard_tap(x, y);
+    break;
+  case LCD_UI_ENROLLING:
+    FaceGallery_GetStatus(&status);
+    if (point_in(x, y, 190, 330, 180, 48)) {
+      app_pipeline_gallery_cancel();
+      ui_message("Enrollment canceled");
+      lcd_ui_page = LCD_UI_GALLERY;
+    } else if (status.samples >= FACE_GALLERY_MIN_SAMPLES &&
+               point_in(x, y, 430, 330, 180, 48)) {
+      result = app_pipeline_gallery_commit();
+      ui_message(gallery_error(result));
+      if (result == FACE_GALLERY_OK)
+        lcd_ui_page = LCD_UI_GALLERY;
+    }
+    break;
+  case LCD_UI_CONFIRM_DELETE:
+    if (point_in(x, y, 210, 300, 170, 48)) {
+      lcd_ui_page = LCD_UI_GALLERY;
+    } else if (point_in(x, y, 420, 300, 170, 48)) {
+      result = app_pipeline_gallery_delete(lcd_ui_delete_slot);
+      ui_message(result == FACE_GALLERY_OK ? "Entry deleted" :
+                                            gallery_error(result));
+      lcd_ui_page = LCD_UI_GALLERY;
+    }
+    break;
+  case LCD_UI_CONFIRM_CLEAR:
+    if (point_in(x, y, 210, 300, 170, 48)) {
+      lcd_ui_page = LCD_UI_GALLERY;
+    } else if (point_in(x, y, 420, 300, 170, 48)) {
+      result = app_pipeline_gallery_clear();
+      ui_message(result == FACE_GALLERY_OK ? "Gallery cleared" :
+                                            gallery_error(result));
+      lcd_ui_page = LCD_UI_GALLERY;
+    }
+    break;
+  }
+}
+
+static void lcd_ui_draw_gallery(uint8_t *buffer)
+{
+  int row_y = 142;
+
+  DRAW_FillArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, 40, 28, 720, 428,
+                  UI_COLOR_PANEL);
+  DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                    70, 52, "Enrollment Gallery (%u/%u)",
+                    (unsigned int)FaceGallery_Count(),
+                    (unsigned int)FACE_GALLERY_MAX_ENTRIES);
+  draw_button(buffer, 650, 42, 90, 42, "CLOSE", UI_COLOR_PANEL_ALT, 1);
+  draw_button(buffer, 70, 90, 190, 42, "NEW PERSON", UI_COLOR_PRIMARY,
+              FaceGallery_Count() < FACE_GALLERY_MAX_ENTRIES);
+  draw_button(buffer, 280, 90, 190, 42, "CLEAR ALL", UI_COLOR_DANGER,
+              FaceGallery_Count() > 0);
+
+  for (uint8_t slot = 0; slot < FACE_GALLERY_MAX_ENTRIES; slot++) {
+    char name[FACE_GALLERY_NAME_MAX + 1];
+    if (FaceGallery_GetName(slot, name, sizeof(name)) != 0)
+      continue;
+    DRAW_FillArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, 70, row_y, 650, 34,
+                    UI_COLOR_PANEL_ALT);
+    DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                      84, row_y + 8, "%s  [slot %u]", name,
+                      (unsigned int)slot);
+    draw_button(buffer, 600, row_y, 120, 34, "DELETE", UI_COLOR_DANGER, 1);
+    row_y += 38;
+  }
+  if (FaceGallery_Count() == 0)
+    DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                      70, 164, "No enrolled identities");
+  if (lcd_ui_message[0] != '\0')
+    DRAW_PrintfArgbHw(&DBG_INFO_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                      70, 430, "%s", lcd_ui_message);
+  if (!lcd_touch_available)
+    DRAW_PrintfArgbHw(&DBG_INFO_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                      500, 430, "Touch controller unavailable");
+}
+
+static void lcd_ui_draw_keyboard(uint8_t *buffer)
+{
+  static const char *rows[] = {
+    "ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ0123", "456789-_."
+  };
+  static const int row_y[] = {120, 178, 236, 294};
+  char key[2] = {0, 0};
+
+  DRAW_FillArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, 40, 28, 720, 428,
+                  UI_COLOR_PANEL);
+  DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                    70, 48, "Enter person name (max %u)",
+                    (unsigned int)FACE_GALLERY_NAME_MAX);
+  DRAW_FillArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, 70, 76, 660, 38,
+                  UI_COLOR_PANEL_ALT);
+  DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                    82, 86, "%s_", lcd_ui_name);
+
+  for (unsigned int row = 0; row < ARRAY_NB(rows); row++) {
+    int count = (int)strlen(rows[row]);
+    int start_x = (LCD_DISPLAY_WIDTH - count * 62) / 2;
+    for (int col = 0; col < count; col++) {
+      key[0] = rows[row][col];
+      draw_button(buffer, start_x + col * 62, row_y[row], 56, 48, key,
+                  UI_COLOR_PANEL_ALT, lcd_ui_name_len < FACE_GALLERY_NAME_MAX);
+    }
+  }
+  draw_button(buffer, 70, 400, 150, 46, "CANCEL", UI_COLOR_PANEL_ALT, 1);
+  draw_button(buffer, 250, 400, 150, 46, "BACKSPACE", UI_COLOR_PANEL_ALT,
+              lcd_ui_name_len > 0);
+  draw_button(buffer, 570, 400, 160, 46, "START", UI_COLOR_PRIMARY,
+              lcd_ui_name_len > 0);
+}
+
+static void lcd_ui_draw_enrolling(uint8_t *buffer)
+{
+  face_gallery_enroll_status_t status;
+  int progress_width;
+
+  FaceGallery_GetStatus(&status);
+  progress_width = status.required_samples > 0
+                       ? 420 * status.samples / status.required_samples
+                       : 0;
+  DRAW_FillArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, 140, 86, 520, 316,
+                  UI_COLOR_PANEL);
+  DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                    180, 120, "Enrolling: %s", status.name);
+  DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                    180, 166, "Look at the camera alone");
+  DRAW_FillArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, 190, 218, 420, 30,
+                  UI_COLOR_DISABLED);
+  if (progress_width > 0)
+    DRAW_FillArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, 190, 218,
+                    progress_width, 30, UI_COLOR_PRIMARY);
+  DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                    330, 264, "Samples: %u/%u", (unsigned int)status.samples,
+                    (unsigned int)status.required_samples);
+  draw_button(buffer, 190, 330, 180, 48, "CANCEL", UI_COLOR_PANEL_ALT, 1);
+  draw_button(buffer, 430, 330, 180, 48, "COMMIT", UI_COLOR_PRIMARY,
+              status.samples >= FACE_GALLERY_MIN_SAMPLES);
+}
+
+static void lcd_ui_draw_confirmation(uint8_t *buffer, int clear_all)
+{
+  char name[FACE_GALLERY_NAME_MAX + 1] = {0};
+  if (!clear_all)
+    (void)FaceGallery_GetName(lcd_ui_delete_slot, name, sizeof(name));
+  DRAW_FillArgbHw(buffer, VENC_WIDTH, VENC_HEIGHT, 150, 110, 500, 260,
+                  UI_COLOR_PANEL);
+  if (clear_all)
+    DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                      210, 170, "Delete every identity?");
+  else
+    DRAW_PrintfArgbHw(&CONF_LEVEL_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                      210, 170, "Delete %s?", name);
+  DRAW_PrintfArgbHw(&DBG_INFO_FONT, buffer, VENC_WIDTH, VENC_HEIGHT,
+                    210, 220, "This writes the persistent gallery.");
+  draw_button(buffer, 210, 300, 170, 48, "BACK", UI_COLOR_PANEL_ALT, 1);
+  draw_button(buffer, 420, 300, 170, 48, "DELETE", UI_COLOR_DANGER, 1);
+}
+
+static void lcd_ui_update_and_draw(uint8_t *buffer)
+{
+  int touch_x;
+  int touch_y;
+
+  if (lcd_touch_get_tap(&touch_x, &touch_y))
+    lcd_ui_handle_tap(touch_x, touch_y);
+
+  switch (lcd_ui_page) {
+  case LCD_UI_CAMERA:
+    draw_button(buffer, 650, 16, 134, 44, "GALLERY", UI_COLOR_PRIMARY, 1);
+    break;
+  case LCD_UI_GALLERY:
+    lcd_ui_draw_gallery(buffer);
+    break;
+  case LCD_UI_KEYBOARD:
+    lcd_ui_draw_keyboard(buffer);
+    break;
+  case LCD_UI_ENROLLING:
+    lcd_ui_draw_enrolling(buffer);
+    break;
+  case LCD_UI_CONFIRM_DELETE:
+    lcd_ui_draw_confirmation(buffer, 0);
+    break;
+  case LCD_UI_CONFIRM_CLEAR:
+    lcd_ui_draw_confirmation(buffer, 1);
+    break;
+  }
+}
 #endif
 
 static int clamp_point(int *x, int *y) {
@@ -353,6 +776,14 @@ void app_display_init(void) {
 #else
   lcd_is_active = 0;
   lcd_write_index = 0;
+  lcd_touch_available = 0;
+  lcd_touch_latched = 0;
+  lcd_touch_address = 0;
+  lcd_ui_page = LCD_UI_CAMERA;
+  lcd_ui_delete_slot = 0;
+  lcd_ui_name_len = 0;
+  memset(lcd_ui_name, 0, sizeof(lcd_ui_name));
+  memset(lcd_ui_message, 0, sizeof(lcd_ui_message));
 #endif
 }
 
@@ -383,6 +814,7 @@ int app_display_setup(void) {
   uvcl_cbs.frame_release = app_uvc_frame_release;
   ret = UVCL_Init(USB1_OTG_HS, &uvcl_conf, &uvcl_cbs);
 #else
+  lcd_touch_init();
   ret = BSP_LCD_InitEx(0, LCD_ORIENTATION_LANDSCAPE,
                        LCD_PIXEL_FORMAT_ARGB8888,
                        LCD_DISPLAY_WIDTH, LCD_DISPLAY_HEIGHT);
@@ -427,6 +859,7 @@ int app_display_render(uint8_t *frame_buffer, od_pp_out_t *pp_out,
                   frame_buffer, VENC_WIDTH, VENC_HEIGHT, 0, 0);
   build_display(lcd_frame_buffer[lcd_write_index], pp_out, landmarks,
                 nb_faces);
+  lcd_ui_update_and_draw(lcd_frame_buffer[lcd_write_index]);
 #endif
 
   stats_detect_update(pp_out->nb_detect);

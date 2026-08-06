@@ -228,6 +228,13 @@ face_gallery_status_t FaceGallery_Commit(void)
   return st;
 }
 
+void FaceGallery_CancelEnrollment(void)
+{
+  xSemaphoreTake(s_mutex, portMAX_DELAY);
+  memset(&s_enroll, 0, sizeof(s_enroll));
+  xSemaphoreGive(s_mutex);
+}
+
 face_gallery_status_t FaceGallery_ImportQ7(const char *name, uint8_t name_len,
                                            const int8_t *embedding)
 {
