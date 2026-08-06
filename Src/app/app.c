@@ -29,8 +29,6 @@
 
 void app_run(void)
 {
-  UVCL_Conf_t uvcl_conf = { 0 };
-  ENC_Conf_t enc_conf = { 0 };
   int ret;
 
   printf("Init application\n");
@@ -45,21 +43,7 @@ void app_run(void)
 
   CAM_Init();
 
-  enc_conf.width = VENC_WIDTH;
-  enc_conf.height = VENC_HEIGHT;
-  enc_conf.fps = UVC_STREAM_FPS;
-  enc_conf.gop_frames = VENC_GOP_FRAMES;
-
-  uvcl_conf.streams[0].width = VENC_WIDTH;
-  uvcl_conf.streams[0].height = VENC_HEIGHT;
-  uvcl_conf.streams[0].fps = UVC_STREAM_FPS;
-  uvcl_conf.streams[0].payload_type = UVCL_PAYLOAD_FB_H264;
-  uvcl_conf.streams_nb = 1;
-  /* Pace transfers to the advertised rate so host timestamps stay monotonic
-   * and media frameworks do not accumulate a corrective jitter buffer. */
-  uvcl_conf.is_immediate_mode = 0;
-
-  ret = app_display_setup(&enc_conf, &uvcl_conf);
+  ret = app_display_setup();
   assert(ret == 0);
 
   app_pipeline_start();

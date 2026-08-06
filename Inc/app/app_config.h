@@ -21,6 +21,14 @@
 #include "postprocess_conf.h"
 #include "sysobj_params.h"
 
+/* Select one output backend in the build system. Existing non-CMake projects
+ * default to UVC until they explicitly define APP_OUTPUT_LCD. */
+#if defined(APP_OUTPUT_UVC) && defined(APP_OUTPUT_LCD)
+#error "Define only one of APP_OUTPUT_UVC or APP_OUTPUT_LCD"
+#elif !defined(APP_OUTPUT_UVC) && !defined(APP_OUTPUT_LCD)
+#define APP_OUTPUT_UVC 1
+#endif
+
 /* ---------------------------------------------------------------------------
  * Persistent parameter store configuration
  * 3 × 4 KB sectors at the very end of the 128 MB NOR flash (MX66UW1G45G).
@@ -75,7 +83,13 @@ typedef enum {
 #define VENC_VD55G1_HEIGHT 480
 
 #define UVC_STREAM_FPS 10
+#if defined(APP_OUTPUT_LCD)
+#define LCD_DISPLAY_WIDTH 800
+#define LCD_DISPLAY_HEIGHT 480
+#define CAMERA_FPS 30
+#else
 #define CAMERA_FPS UVC_STREAM_FPS
+#endif
 #define VENC_GOP_FRAMES 5
 
 #define CAPTURE_FORMAT DCMIPP_PIXEL_PACKER_FORMAT_ARGB8888

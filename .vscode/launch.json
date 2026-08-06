@@ -4,17 +4,41 @@
         {
             "type": "stlinkgdbtarget",
             "request": "launch",
-            "name": "STM32N6570-DK (x-cube-n6-ai-h264-usb-uvc)",
+            "name": "STM32N6570-DK (UVC)",
             "cwd": "${workspaceFolder}",
-            "preLaunchTask": "CMake Build (Debug)",
+            "preLaunchTask": "CMake Build (Debug UVC)",
+            "device": "STM32N657X0HxQ",
+            "deviceCore": "Cortex-M55",
+            "runEntry": "main",
+            "svdPath": "C:/ST/STM32CubeCLT_1.18.0/STMicroelectronics_CMSIS_SVD/STM32N657.svd",
+
+            "imagesAndSymbols": [
+                {
+                    "symbolFileName": "${workspaceFolder}/build/Debug/Project.elf",
+                    "imageFileName": "${workspaceFolder}/build/Debug/Project.elf"
+                }
+            ],
+            "serverExtLoader": [
+                {
+                    "loader": "C:/ST/STM32CubeCLT_1.18.0/STM32CubeProgrammer/bin/ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr",
+                    "initialize": false
+                }
+            ]
+        },
+        {
+            "type": "stlinkgdbtarget",
+            "request": "launch",
+            "name": "STM32N6570-DK (LCD)",
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "CMake Build (Debug LCD)",
             "device": "STM32N657X0HxQ",
             "deviceCore": "Cortex-M55",
             "runEntry": "main",
             "svdPath": "C:/ST/STM32CubeCLT_1.18.0/STMicroelectronics_CMSIS_SVD/STM32N657.svd",
             "imagesAndSymbols": [
                 {
-                    "symbolFileName": "${workspaceFolder}/build/Debug/Project.elf",
-                    "imageFileName": "${workspaceFolder}/build/Debug/Project.elf"
+                    "symbolFileName": "${workspaceFolder}/build/Debug-LCD/Project.elf",
+                    "imageFileName": "${workspaceFolder}/build/Debug-LCD/Project.elf"
                 }
             ],
             "serverExtLoader": [

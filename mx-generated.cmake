@@ -267,6 +267,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # ------------------------------ Definitions ----------------------------- #
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+    ${APP_DISPLAY_COMPILE_DEFINITION}
     STM32IPL
     STM32N657xx
     USE_FULL_ASSERT

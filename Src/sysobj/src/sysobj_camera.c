@@ -68,6 +68,12 @@ static void CAM_setSensorInfo(CMW_Sensor_Name_t sensor)
   default:
     assert(0);
   }
+#if defined(APP_OUTPUT_LCD)
+  /* Match the LTDC framebuffer exactly; the camera pipe performs the crop and
+   * resize in hardware before the HUD is drawn. */
+  venc_width = LCD_DISPLAY_WIDTH;
+  venc_height = LCD_DISPLAY_HEIGHT;
+#endif
   printf("Detected %s\n", sensor_names[sensor_name_idx]);
 }
 

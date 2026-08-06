@@ -19,6 +19,20 @@ set(CMAKE_CXX_COMPILER_FORCED "true")
 set(CMAKE_PROJECT_NAME x-cube-n6-ai-h264-usb-uvc)
 project(${CMAKE_PROJECT_NAME})
 
+# Select exactly one video output at configure time. UVC remains the default
+# so existing build commands keep their current behavior.
+set(APP_DISPLAY_OUTPUT "UVC" CACHE STRING "Video output backend: UVC or LCD")
+set_property(CACHE APP_DISPLAY_OUTPUT PROPERTY STRINGS UVC LCD)
+string(TOUPPER "${APP_DISPLAY_OUTPUT}" APP_DISPLAY_OUTPUT_NORMALIZED)
+if(APP_DISPLAY_OUTPUT_NORMALIZED STREQUAL "UVC")
+    set(APP_DISPLAY_COMPILE_DEFINITION APP_OUTPUT_UVC=1)
+elseif(APP_DISPLAY_OUTPUT_NORMALIZED STREQUAL "LCD")
+    set(APP_DISPLAY_COMPILE_DEFINITION APP_OUTPUT_LCD=1)
+else()
+    message(FATAL_ERROR "APP_DISPLAY_OUTPUT must be UVC or LCD (got '${APP_DISPLAY_OUTPUT}')")
+endif()
+message(STATUS "Application video output: ${APP_DISPLAY_OUTPUT_NORMALIZED}")
+
 # ---------------------------------------------------------------------------
 # n6-platform: reusable STM32N6 platform library
 # Must be configured and added BEFORE include("mx-generated.cmake") so that

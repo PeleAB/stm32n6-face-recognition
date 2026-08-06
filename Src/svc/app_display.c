@@ -24,6 +24,7 @@
 
 #include "FreeRTOS.h"
 #include "app/app.h"
+#include "app/app_config.h"
 #include "app_postprocess.h"
 #include "semphr.h"
 #include "stm32n6570_discovery.h"
@@ -33,7 +34,12 @@
 #include "svc/draw.h"
 #include "svc/face_detect.h"
 #include "svc/figs.h"
+#if defined(APP_OUTPUT_UVC)
 #include "sysobj_encoder.h"
+#include "uvcl.h"
+#else
+#include "stm32n6570_discovery_lcd.h"
+#endif
 #include "task.h"
 #include "utils.h"
 
@@ -43,9 +49,9 @@
 #define OBJ_RECT_COLOR   0xffffffff
 #define LANDMARK_COLOR   0xff00ff00  /* green landmark dots */
 #define LANDMARK_DOT_SZ  5
-#define VENC_MAX_WIDTH 1280
-#define VENC_MAX_HEIGHT 720
+#if defined(APP_OUTPUT_UVC)
 #define VENC_OUT_BUFFER_SIZE (255 * 1024)
+#endif
 
 typedef struct {
   float conf;
@@ -62,12 +68,21 @@ static StaticSemaphore_t dma2d_lock_buffer;
 static SemaphoreHandle_t dma2d_sem;
 static StaticSemaphore_t dma2d_sem_buffer;
 
+#if defined(APP_OUTPUT_UVC)
 static struct uvcl_callbacks uvcl_cbs;
 static int uvc_is_active;
 static volatile int buffer_flying;
 static int force_intra;
 
 static uint8_t venc_out_buffer[VENC_OUT_BUFFER_SIZE] ALIGN_32 UNCACHED;
+#else
+#define LCD_FRAME_BUFFER_COUNT 2
+static int lcd_is_active;
+static unsigned int lcd_write_index;
+static uint8_t lcd_frame_buffer[LCD_FRAME_BUFFER_COUNT]
+                               [LCD_DISPLAY_WIDTH * LCD_DISPLAY_HEIGHT * CAPTURE_BPP]
+                               ALIGN_32 IN_PSRAM;
+#endif
 
 static int clamp_point(int *x, int *y) {
   int xi = *x;
@@ -180,8 +195,13 @@ static int build_display_disp_dbg(uint8_t *p_buffer, stat_info_t *si,
   time_stat_display(&si->nn_pp_time, p_buffer, "pp           ", line_nb++, 4);
   time_stat_display(&si->disp_display_time, p_buffer, "display      ",
                     line_nb++, 4);
+#if defined(APP_OUTPUT_UVC)
   time_stat_display(&si->disp_enc_time, p_buffer, "encode       ", line_nb++,
                     4);
+#else
+  time_stat_display(&si->disp_enc_time, p_buffer, "LCD present  ", line_nb++,
+                    4);
+#endif
 
   return line_nb;
 }
@@ -273,6 +293,7 @@ static void build_display(uint8_t *p_buffer, od_pp_out_t *pp_out,
   build_display_stat_info(p_buffer, &si_copy);
 }
 
+#if defined(APP_OUTPUT_UVC)
 static size_t encode_display(int is_intra_force, uint8_t *p_buffer) {
   return ENC_EncodeFrame(p_buffer, venc_out_buffer, VENC_OUT_BUFFER_SIZE,
                          is_intra_force);
@@ -310,6 +331,7 @@ static void app_uvc_frame_release(struct uvcl_callbacks *cbs, void *frame) {
 
   buffer_flying = 0;
 }
+#endif
 
 void app_display_init(void) {
   int ret;
@@ -324,32 +346,59 @@ void app_display_init(void) {
   ret = DRAW_FontSetup(&Font16, &font_16);
   assert(ret == 0);
 
+#if defined(APP_OUTPUT_UVC)
   buffer_flying = 0;
   force_intra = 0;
   uvc_is_active = 0;
+#else
+  lcd_is_active = 0;
+  lcd_write_index = 0;
+#endif
 }
 
-int app_display_setup(const ENC_Conf_t *enc_conf,
-                      const UVCL_Conf_t *uvcl_conf) {
-  UVCL_Conf_t uvcl_local = *uvcl_conf;
-  ENC_Conf_t enc_local = *enc_conf;
+int app_display_setup(void) {
   int ret;
 
-  ENC_Init(&enc_local);
+#if defined(APP_OUTPUT_UVC)
+  UVCL_Conf_t uvcl_conf = { 0 };
+  ENC_Conf_t enc_conf = { 0 };
+
+  enc_conf.width = VENC_WIDTH;
+  enc_conf.height = VENC_HEIGHT;
+  enc_conf.fps = UVC_STREAM_FPS;
+  enc_conf.gop_frames = VENC_GOP_FRAMES;
+  ENC_Init(&enc_conf);
+
+  uvcl_conf.streams[0].width = VENC_WIDTH;
+  uvcl_conf.streams[0].height = VENC_HEIGHT;
+  uvcl_conf.streams[0].fps = UVC_STREAM_FPS;
+  uvcl_conf.streams[0].payload_type = UVCL_PAYLOAD_FB_H264;
+  uvcl_conf.streams_nb = 1;
+  /* Pace transfers to the advertised rate so host timestamps stay monotonic
+   * and media frameworks do not accumulate a corrective jitter buffer. */
+  uvcl_conf.is_immediate_mode = 0;
 
   uvcl_cbs.streaming_active = app_uvc_streaming_active;
   uvcl_cbs.streaming_inactive = app_uvc_streaming_inactive;
   uvcl_cbs.frame_release = app_uvc_frame_release;
-  ret = UVCL_Init(USB1_OTG_HS, &uvcl_local, &uvcl_cbs);
+  ret = UVCL_Init(USB1_OTG_HS, &uvcl_conf, &uvcl_cbs);
+#else
+  ret = BSP_LCD_InitEx(0, LCD_ORIENTATION_LANDSCAPE,
+                       LCD_PIXEL_FORMAT_ARGB8888,
+                       LCD_DISPLAY_WIDTH, LCD_DISPLAY_HEIGHT);
+#endif
 
   return ret;
 }
 
 int app_display_render(uint8_t *frame_buffer, od_pp_out_t *pp_out,
                        float landmarks[][FACE_NB_LANDMARKS * 2], int nb_faces) {
+#if defined(APP_OUTPUT_UVC)
   static int uvc_is_active_prev = 0;
+#endif
   stat_info_t *stats = app_stats_state();
   uint32_t ts;
+#if defined(APP_OUTPUT_UVC)
   int len;
 
   if (!uvc_is_active) {
@@ -362,14 +411,29 @@ int app_display_render(uint8_t *frame_buffer, od_pp_out_t *pp_out,
    * ownership races and makes the HUD appear on alternating frames. */
   if (buffer_flying)
     return 0;
+#else
+  int ret;
+#endif
 
   ts = HAL_GetTick();
+#if defined(APP_OUTPUT_UVC)
   build_display(frame_buffer, pp_out, landmarks, nb_faces);
+#else
+  /* Snapshot the camera image first, then compose only into the LCD-owned
+   * buffer. DCMIPP may reuse its capture buffer at any time after the frame
+   * event, so drawing there before copying lets it erase HUD pixels mid-copy. */
+  DRAW_CopyArgbHW(lcd_frame_buffer[lcd_write_index],
+                  LCD_DISPLAY_WIDTH, LCD_DISPLAY_HEIGHT,
+                  frame_buffer, VENC_WIDTH, VENC_HEIGHT, 0, 0);
+  build_display(lcd_frame_buffer[lcd_write_index], pp_out, landmarks,
+                nb_faces);
+#endif
 
   stats_detect_update(pp_out->nb_detect);
 
   time_stat_update(&stats->disp_display_time, HAL_GetTick() - ts);
 
+#if defined(APP_OUTPUT_UVC)
   ts = HAL_GetTick();
   len = (int)encode_display(!uvc_is_active_prev || force_intra, frame_buffer);
   time_stat_update(&stats->disp_enc_time, HAL_GetTick() - ts);
@@ -381,6 +445,28 @@ int app_display_render(uint8_t *frame_buffer, od_pp_out_t *pp_out,
   uvc_is_active_prev = uvc_is_active;
 
   return uvc_is_active;
+#else
+  /* Queue the new framebuffer address for the next vertical blank so LTDC
+   * never switches buffers halfway through a scanout. */
+  ts = HAL_GetTick();
+  ret = BSP_LCD_Reload(0, BSP_LCD_RELOAD_NONE);
+  assert(ret == BSP_ERROR_NONE);
+  ret = BSP_LCD_SetLayerAddress(0, 0,
+                                (uint32_t)lcd_frame_buffer[lcd_write_index]);
+  assert(ret == BSP_ERROR_NONE);
+  ret = BSP_LCD_Reload(0, lcd_is_active ? BSP_LCD_RELOAD_VERTICAL_BLANKING
+                                        : BSP_LCD_RELOAD_IMMEDIATE);
+  assert(ret == BSP_ERROR_NONE);
+  if (!lcd_is_active) {
+    ret = BSP_LCD_DisplayOn(0);
+    assert(ret == BSP_ERROR_NONE);
+    lcd_is_active = 1;
+  }
+  lcd_write_index = (lcd_write_index + 1U) % LCD_FRAME_BUFFER_COUNT;
+  time_stat_update(&stats->disp_enc_time, HAL_GetTick() - ts);
+
+  return 1;
+#endif
 }
 
 void DRAW_HwLock(void *dma2d_handle) {

@@ -210,9 +210,17 @@ Set your board to [development mode](#boot-modes).
 #### VSCode + STM32Cube Extension (CMake)
 
 1. Install STM32CubeCLT (for `cube-cmake` and the GNU toolchain) and the STM32Cube extension for VSCode.
-2. Configure the project with CMake presets: `cmake --preset Debug` (or use the **CMake Configure (Debug)** VSCode task).
-3. Build: `cmake --build --preset Debug` (or the **CMake Build (Debug)** VSCode task). Artifacts are written to `build/Debug/Project.elf|bin|hex`.
+2. Choose the compile-time video output and configure it:
+   - USB UVC (default): `cmake --preset Debug`
+   - On-board 800x480 LCD: `cmake --preset Debug-LCD`
+3. Build the matching preset: `cmake --build --preset Debug` or `cmake --build --preset Debug-LCD`. Artifacts are written below the corresponding directory in `build/`.
 4. Launch your preferred debug configuration from the STM32Cube extension (the `.ioc` file is available as `x-cube-n6-ai-h264-usb-uvc.ioc`).
+
+The underlying CMake setting is `APP_DISPLAY_OUTPUT=UVC|LCD`. It defines
+exactly one firmware macro, `APP_OUTPUT_UVC` or `APP_OUTPUT_LCD`; UVC is used
+when no selection is supplied by a non-CMake build system. The LCD build sends
+camera frames and the same detection/recognition HUD directly to the board's
+LTDC display and does not initialize USB video streaming.
 
 #### STM32CubeIDE
 

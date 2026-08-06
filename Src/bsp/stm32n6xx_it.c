@@ -18,10 +18,13 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "bsp/stm32n6xx_it.h"
+#include "app/app_config.h"
 #include "stm32n6xx_hal.h"
 
 #include "cmw_camera.h"
+#if defined(APP_OUTPUT_UVC)
 #include "uvcl.h"
+#endif
 
 extern DMA_HandleTypeDef hdma_usart1_rx;
 
@@ -95,7 +98,9 @@ void GPDMA1_Channel0_IRQHandler(void) { HAL_DMA_IRQHandler(&hdma_usart1_rx); }
 extern UART_HandleTypeDef huart1;
 void USART1_IRQHandler(void) { HAL_UART_IRQHandler(&huart1); }
 
+#if defined(APP_OUTPUT_UVC)
 void USB1_OTG_HS_IRQHandler(void) { UVCL_IRQHandler(); }
+#endif
 
 /* A RAM-debug launch can inherit a pending WWDG early-warning interrupt from
  * the STM32N6 boot/debug sequence even though this application never enables
