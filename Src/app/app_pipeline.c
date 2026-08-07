@@ -19,6 +19,7 @@
 #include "app/app_pipeline.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -36,6 +37,7 @@
 #include "svc/face_detect.h"
 #include "stai_fd.h"
 #include "stai_faceid.h"
+#include "stm32n6570_discovery_xspi.h"
 #include "stm32ipl.h"
 #include "svc/app_trackobject.h"
 #include "stm32n6xx_hal.h"
@@ -51,6 +53,7 @@
 #define CAPTURE_BUFFER_NB (CAPTURE_DELAY + 2)
 #define VENC_MAX_WIDTH 1280
 #define VENC_MAX_HEIGHT 720
+#define FACE_SOURCE_MAX_SIZE VENC_MAX_HEIGHT
 
 /* Model Related Info — CenterFace (fd) + MobileFaceNet (faceid) */
 #define NN_FD_INPUT_SIZE      STAI_FD_IN_1_SIZE      /* 128*128*3 = 49152 */
@@ -70,6 +73,11 @@ typedef struct {
 static uint8_t capture_buffer[CAPTURE_BUFFER_NB][VENC_MAX_WIDTH * VENC_MAX_HEIGHT * CAPTURE_BPP] ALIGN_32 IN_PSRAM;
 static int capture_buffer_disp_idx = 1;
 static int capture_buffer_capt_idx = 0;
+static volatile int capture_buffer_last_complete_idx = -1;
+static int nn_capture_buffer_idx;
+static int nn_source_frame_idx[2] = {-1, -1};
+static uint16_t face_source_snapshot[FACE_SOURCE_MAX_SIZE * FACE_SOURCE_MAX_SIZE]
+                                    ALIGN_32 IN_PSRAM;
 
 /* STAI network contexts (statically allocated) */
 STAI_NETWORK_CONTEXT_DECLARE(network_fd_ctx, STAI_FD_CONTEXT_SIZE);
@@ -115,14 +123,26 @@ void app_pipeline_set_face_input_mode(uint32_t mode)
     s_face_input_mode = mode;
 }
 
+void app_pipeline_set_conf_threshold(uint32_t percent)
+{
+  if (percent > 100U)
+    percent = 100U;
+  s_fd_pp_params.conf_threshold = (float)percent / 100.0f;
+  TrackObject_SetStartConfidence(s_fd_pp_params.conf_threshold);
+}
+
 static void params_pre_write_hook(void)
 {
   /* Block until any running inference releases the mutex */
   xSemaphoreTake(s_inference_mutex, portMAX_DELAY);
+  /* Parameter sectors share the NOR device used in memory-mapped mode by the
+   * NPU. Indirect erase/write commands are rejected until MMP is disabled. */
+  (void)BSP_XSPI_NOR_DisableMemoryMappedMode(PARAM_XSPI_INST);
 }
 
 static void params_post_write_hook(void)
 {
+  (void)BSP_XSPI_NOR_EnableMemoryMappedMode(PARAM_XSPI_INST);
   xSemaphoreGive(s_inference_mutex);
 }
 
@@ -148,6 +168,7 @@ static void app_main_pipe_frame_event(void)
   int next_capt_idx = (capture_buffer_capt_idx + 1) % CAPTURE_BUFFER_NB;
   int ret;
 
+  capture_buffer_last_complete_idx = capture_buffer_capt_idx;
   ret = CAM_DisplayPipe_UpdateAddress(capture_buffer[next_capt_idx]);
   assert(ret == 0);
   (void)ret;
@@ -168,13 +189,18 @@ static void app_main_pipe_frame_event(void)
 static void app_ancillary_pipe_frame_event(void)
 {
   uint8_t *next_buffer;
+  int next_buffer_idx;
   int ret;
 
   next_buffer = bqueue_get_free(&nn_input_queue, 0);
   if (next_buffer) {
+    next_buffer_idx = (next_buffer == nn_input_buffers[0]) ? 0 : 1;
+    nn_source_frame_idx[nn_capture_buffer_idx] =
+        capture_buffer_last_complete_idx;
     ret = CAM_NNPipe_UpdateAddress(next_buffer);
     assert(ret == 0);
     (void)ret;
+    nn_capture_buffer_idx = next_buffer_idx;
     bqueue_put_ready(&nn_input_queue);
   }
 }
@@ -190,11 +216,19 @@ static void app_main_pipe_vsync_event(void)
   (void)ret;
 }
 
-/* Fit a 2D similarity transform from detected landmarks to MobileFaceNet's
- * canonical 112x112 template, then write the model's planar RGB input. */
-static int face_align_to_chw(const uint8_t *src_data,
-                             const float landmarks[FACE_NB_LANDMARKS * 2],
-                             uint8_t *dst)
+typedef struct {
+  float a;
+  float b;
+  float tx;
+  float ty;
+  float norm;
+} face_transform_t;
+
+/* Fit the current five-point MobileFaceNet similarity transform at any source
+ * resolution. Detector landmarks remain normalized to the square NN ROI. */
+static int face_fit_transform(
+    const float landmarks[FACE_NB_LANDMARKS * 2], int src_width,
+    int src_height, face_transform_t *transform)
 {
   static const float canonical[FACE_NB_LANDMARKS][2] = {
     {38.2946f, 51.6963f}, {73.5318f, 51.5014f},
@@ -206,8 +240,8 @@ static int face_align_to_chw(const uint8_t *src_data,
   float dot = 0.0f, cross = 0.0f, norm = 0.0f;
 
   for (int i = 0; i < FACE_NB_LANDMARKS; i++) {
-    src_mean_x += landmarks[2 * i] * NN_WIDTH;
-    src_mean_y += landmarks[2 * i + 1] * NN_HEIGHT;
+    src_mean_x += landmarks[2 * i] * src_width;
+    src_mean_y += landmarks[2 * i + 1] * src_height;
     dst_mean_x += canonical[i][0];
     dst_mean_y += canonical[i][1];
   }
@@ -217,8 +251,8 @@ static int face_align_to_chw(const uint8_t *src_data,
   dst_mean_y /= FACE_NB_LANDMARKS;
 
   for (int i = 0; i < FACE_NB_LANDMARKS; i++) {
-    float sx = landmarks[2 * i] * NN_WIDTH - src_mean_x;
-    float sy = landmarks[2 * i + 1] * NN_HEIGHT - src_mean_y;
+    float sx = landmarks[2 * i] * src_width - src_mean_x;
+    float sy = landmarks[2 * i + 1] * src_height - src_mean_y;
     float dx = canonical[i][0] - dst_mean_x;
     float dy = canonical[i][1] - dst_mean_y;
     dot += sx * dx + sy * dy;
@@ -228,42 +262,61 @@ static int face_align_to_chw(const uint8_t *src_data,
   if (norm < 1.0f)
     return -1;
 
-  float a = dot / norm;
-  float b = cross / norm;
-  float tx = dst_mean_x - a * src_mean_x + b * src_mean_y;
-  float ty = dst_mean_y - b * src_mean_x - a * src_mean_y;
-  float transform_norm = a * a + b * b;
-  if (transform_norm < 1.0e-6f)
+  transform->a = dot / norm;
+  transform->b = cross / norm;
+  transform->tx = dst_mean_x - transform->a * src_mean_x +
+                  transform->b * src_mean_y;
+  transform->ty = dst_mean_y - transform->b * src_mean_x -
+                  transform->a * src_mean_y;
+  transform->norm = transform->a * transform->a +
+                    transform->b * transform->b;
+  if (transform->norm < 1.0e-6f)
+    return -1;
+
+  return 0;
+}
+
+static void face_inverse_point(const face_transform_t *transform, int x,
+                               int y, float *src_x, float *src_y)
+{
+  float ux = (float)x - transform->tx;
+  float uy = (float)y - transform->ty;
+
+  *src_x = (transform->a * ux + transform->b * uy) / transform->norm;
+  *src_y = (-transform->b * ux + transform->a * uy) / transform->norm;
+}
+
+static int face_align_rgb888_to_chw(
+    const uint8_t *src_data, int src_width, int src_height,
+    const float landmarks[FACE_NB_LANDMARKS * 2], uint8_t *dst)
+{
+  face_transform_t transform;
+
+  if (face_fit_transform(landmarks, src_width, src_height, &transform) != 0)
     return -1;
 
   const rgb888_t *src = (const rgb888_t *)src_data;
   const int plane_size = STAI_FACEID_IN_1_WIDTH * STAI_FACEID_IN_1_HEIGHT;
   for (int y = 0; y < STAI_FACEID_IN_1_HEIGHT; y++) {
     for (int x = 0; x < STAI_FACEID_IN_1_WIDTH; x++) {
-      float ux = (float)x - tx;
-      float uy = (float)y - ty;
-      float src_x = (a * ux + b * uy) / transform_norm;
-      float src_y = (-b * ux + a * uy) / transform_norm;
+      float src_x;
+      float src_y;
       int out_idx = y * STAI_FACEID_IN_1_WIDTH + x;
 
-      if (src_x < 0.0f || src_y < 0.0f ||
-          src_x > (float)(NN_WIDTH - 1) || src_y > (float)(NN_HEIGHT - 1)) {
-        dst[out_idx] = 0;
-        dst[plane_size + out_idx] = 0;
-        dst[2 * plane_size + out_idx] = 0;
-        continue;
-      }
+      face_inverse_point(&transform, x, y, &src_x, &src_y);
+      src_x = fminf((float)(src_width - 1), fmaxf(0.0f, src_x));
+      src_y = fminf((float)(src_height - 1), fmaxf(0.0f, src_y));
 
       int x0 = (int)src_x;
       int y0 = (int)src_y;
-      int x1 = MIN(x0 + 1, NN_WIDTH - 1);
-      int y1 = MIN(y0 + 1, NN_HEIGHT - 1);
+      int x1 = MIN(x0 + 1, src_width - 1);
+      int y1 = MIN(y0 + 1, src_height - 1);
       float wx = src_x - (float)x0;
       float wy = src_y - (float)y0;
-      const rgb888_t p00 = src[y0 * NN_WIDTH + x0];
-      const rgb888_t p10 = src[y0 * NN_WIDTH + x1];
-      const rgb888_t p01 = src[y1 * NN_WIDTH + x0];
-      const rgb888_t p11 = src[y1 * NN_WIDTH + x1];
+      const rgb888_t p00 = src[y0 * src_width + x0];
+      const rgb888_t p10 = src[y0 * src_width + x1];
+      const rgb888_t p01 = src[y1 * src_width + x0];
+      const rgb888_t p11 = src[y1 * src_width + x1];
 #define BILERP_CHANNEL(channel) \
       ((1.0f - wy) * ((1.0f - wx) * p00.channel + wx * p10.channel) + \
        wy * ((1.0f - wx) * p01.channel + wx * p11.channel))
@@ -274,6 +327,104 @@ static int face_align_to_chw(const uint8_t *src_data,
     }
   }
   return 0;
+}
+
+static void rgb565_channels(uint16_t pixel, float *r, float *g, float *b)
+{
+  uint8_t r5 = (uint8_t)((pixel >> 11) & 0x1fU);
+  uint8_t g6 = (uint8_t)((pixel >> 5) & 0x3fU);
+  uint8_t b5 = (uint8_t)(pixel & 0x1fU);
+  *r = (float)((r5 << 3) | (r5 >> 2));
+  *g = (float)((g6 << 2) | (g6 >> 4));
+  *b = (float)((b5 << 3) | (b5 >> 2));
+}
+
+static int face_align_rgb565_to_chw(
+    const uint16_t *src, int src_size,
+    const float landmarks[FACE_NB_LANDMARKS * 2], uint8_t *dst)
+{
+  face_transform_t transform;
+  const int plane_size = STAI_FACEID_IN_1_WIDTH * STAI_FACEID_IN_1_HEIGHT;
+
+  if (face_fit_transform(landmarks, src_size, src_size, &transform) != 0)
+    return -1;
+
+  for (int y = 0; y < STAI_FACEID_IN_1_HEIGHT; y++) {
+    for (int x = 0; x < STAI_FACEID_IN_1_WIDTH; x++) {
+      float src_x;
+      float src_y;
+      float r00, g00, b00, r10, g10, b10;
+      float r01, g01, b01, r11, g11, b11;
+      int out_idx = y * STAI_FACEID_IN_1_WIDTH + x;
+
+      face_inverse_point(&transform, x, y, &src_x, &src_y);
+      src_x = fminf((float)(src_size - 1), fmaxf(0.0f, src_x));
+      src_y = fminf((float)(src_size - 1), fmaxf(0.0f, src_y));
+
+      int x0 = (int)src_x;
+      int y0 = (int)src_y;
+      int x1 = MIN(x0 + 1, src_size - 1);
+      int y1 = MIN(y0 + 1, src_size - 1);
+      float wx = src_x - (float)x0;
+      float wy = src_y - (float)y0;
+      rgb565_channels(src[y0 * src_size + x0], &r00, &g00, &b00);
+      rgb565_channels(src[y0 * src_size + x1], &r10, &g10, &b10);
+      rgb565_channels(src[y1 * src_size + x0], &r01, &g01, &b01);
+      rgb565_channels(src[y1 * src_size + x1], &r11, &g11, &b11);
+#define BILERP_VALUE(v00, v10, v01, v11) \
+      ((1.0f - wy) * ((1.0f - wx) * (v00) + wx * (v10)) + \
+       wy * ((1.0f - wx) * (v01) + wx * (v11)))
+      dst[out_idx] = (uint8_t)(BILERP_VALUE(r00, r10, r01, r11) + 0.5f);
+      dst[plane_size + out_idx] =
+          (uint8_t)(BILERP_VALUE(g00, g10, g01, g11) + 0.5f);
+      dst[2 * plane_size + out_idx] =
+          (uint8_t)(BILERP_VALUE(b00, b10, b01, b11) + 0.5f);
+#undef BILERP_VALUE
+    }
+  }
+  return 0;
+}
+
+static int capture_face_source_snapshot(int frame_idx)
+{
+  int frame_width = VENC_WIDTH;
+  int frame_height = VENC_HEIGHT;
+  int src_x_offset;
+  int src_y_offset;
+  int source_size = MIN(frame_width, frame_height);
+  const uint32_t *src;
+
+  if (frame_idx < 0 || frame_idx >= CAPTURE_BUFFER_NB ||
+      source_size > FACE_SOURCE_MAX_SIZE)
+    return 0;
+
+  SYSOBJ_CacheInvalidate(capture_buffer[frame_idx],
+                         frame_width * frame_height * CAPTURE_BPP);
+  src = (const uint32_t *)capture_buffer[frame_idx];
+  src_x_offset = (frame_width - source_size) / 2;
+  src_y_offset = (frame_height - source_size) / 2;
+
+  for (int y = 0; y < source_size; y++) {
+    const uint32_t *src_row = src +
+        (src_y_offset + y) * frame_width + src_x_offset;
+    uint16_t *dst_row = face_source_snapshot + y * source_size;
+    for (int x = 0; x < source_size; x++) {
+      uint32_t pixel = src_row[x];
+      dst_row[x] = (uint16_t)(((pixel >> 8) & 0xf800U) |
+                              ((pixel >> 5) & 0x07e0U) |
+                              ((pixel >> 3) & 0x001fU));
+    }
+  }
+  return source_size;
+}
+
+static void map_detection_to_display(
+    od_pp_outBuffer_t *box, float landmarks[FACE_NB_LANDMARKS * 2])
+{
+  CAM_NnToDisplayPoint(&box->x_center, &box->y_center);
+  CAM_NnToDisplaySize(&box->width, &box->height);
+  for (int i = 0; i < FACE_NB_LANDMARKS; i++)
+    CAM_NnToDisplayPoint(&landmarks[2 * i], &landmarks[2 * i + 1]);
 }
 
 /* DCMIPP RGB888_YUV444_1 is stored as packed B,G,R bytes (rgb888_t), while
@@ -319,6 +470,7 @@ static void nn_thread_fct(void *arg)
 
   uint8_t *nn_pipe_dst = bqueue_get_free(&nn_input_queue, 0);
   assert(nn_pipe_dst);
+  nn_capture_buffer_idx = (nn_pipe_dst == nn_input_buffers[0]) ? 0 : 1;
   CAM_NNPipe_Start(nn_pipe_dst, CMW_MODE_CONTINUOUS);
 
   /* Get faceid input buffer — statically allocated by model, address is fixed */
@@ -330,6 +482,8 @@ static void nn_thread_fct(void *arg)
   while (1)
   {
     uint8_t *capture_buffer_local;
+    int face_source_size = 0;
+    int nn_buffer_idx;
 
     nn_period[0] = nn_period[1];
     nn_period[1] = HAL_GetTick();
@@ -337,6 +491,7 @@ static void nn_thread_fct(void *arg)
 
     capture_buffer_local = bqueue_get_ready(&nn_input_queue);
     assert(capture_buffer_local);
+    nn_buffer_idx = (capture_buffer_local == nn_input_buffers[0]) ? 0 : 1;
 
     total_ts = HAL_GetTick();
     ts = HAL_GetTick();
@@ -348,8 +503,12 @@ static void nn_thread_fct(void *arg)
     SYSOBJ_CacheInvalidate(capture_buffer_local, NN_INPUT_BUFFER_SIZE);
 
     uint32_t face_input_mode = s_face_input_mode;
-    if (face_input_mode == FACE_INPUT_STATIC)
+    if (face_input_mode == FACE_INPUT_STATIC) {
       load_static_face_fixture(capture_buffer_local);
+    } else {
+      face_source_size = capture_face_source_snapshot(
+          nn_source_frame_idx[nn_buffer_idx]);
+    }
 
     camera_bgr_to_rgb_chw(capture_buffer_local, fd_input_buffer);
     SCB_CleanDCache_by_Addr((uint32_t *)fd_input_buffer,
@@ -388,8 +547,12 @@ static void nn_thread_fct(void *arg)
     int nb_faces = MIN(pp_out_buf.boxes.nb_detect, APP_MAX_OBJECT_DETECT);
 
     for (int i = 0; i < nb_faces; i++) {
-      if (face_align_to_chw(capture_buffer_local, pp_out_buf.landmarks[i],
-                            faceid_input_buf) != 0) {
+      int align_ret = face_source_size > 0
+          ? face_align_rgb565_to_chw(face_source_snapshot, face_source_size,
+                                     pp_out_buf.landmarks[i], faceid_input_buf)
+          : face_align_rgb888_to_chw(capture_buffer_local, NN_WIDTH, NN_HEIGHT,
+                                     pp_out_buf.landmarks[i], faceid_input_buf);
+      if (align_ret != 0) {
         memset(faceid_features_all[i], 0,
                NN_FACEID_OUTPUT_SIZE * sizeof(float));
         continue;
@@ -410,6 +573,12 @@ static void nn_thread_fct(void *arg)
      * be averaged into one person's template. */
     if (nb_faces == 1)
       FaceGallery_OfferEmbedding(faceid_features_all[0]);
+
+    /* CenterFace coordinates are relative to its centered square sensor ROI.
+     * Convert them only after recognition, which samples the matching square
+     * snapshot, so tracking and both display backends use wide-frame space. */
+    for (int i = 0; i < nb_faces; i++)
+      map_detection_to_display(&nn_fd_boxes[i], pp_out_buf.landmarks[i]);
 
     /* 4. Update tracking */
     od_pp_out_t tracking_pp = pp_out_buf.boxes;
@@ -480,7 +649,7 @@ static void isp_thread_fct(void *arg)
  * ------------------------------------------------------------------------- */
 static const param_descriptor_t s_param_table[PARAM_ID_COUNT] = {
   /* id                    type            default   min    max   */
-  { PARAM_CONF_THRESHOLD, PARAM_TYPE_U32,  50ULL,   0ULL,  100ULL },
+  { PARAM_CONF_THRESHOLD, PARAM_TYPE_U32,  40ULL,   0ULL,  100ULL },
   { PARAM_BRIGHTNESS,     PARAM_TYPE_U32,  80ULL,   0ULL,  100ULL },
   { PARAM_TARGET_FPS,     PARAM_TYPE_U32,  30ULL,   1ULL,   60ULL },
   { PARAM_FACE_INPUT_MODE, PARAM_TYPE_U32,  0ULL,   0ULL,    1ULL },
@@ -509,7 +678,9 @@ void app_pipeline_init(void)
   FaceGallery_Init();
 
   uint64_t face_input_mode = FACE_INPUT_CAMERA;
-  (void)sysobj_params_read(PARAM_FACE_INPUT_MODE, &face_input_mode, NULL);
+  bool was_default;
+  (void)sysobj_params_read(PARAM_FACE_INPUT_MODE, &face_input_mode,
+                           &was_default);
   app_pipeline_set_face_input_mode((uint32_t)face_input_mode);
 
   /* Initialize LL_ATON runtime — creates the DAO mutex required by
@@ -528,9 +699,14 @@ void app_pipeline_init(void)
   /* Post-processing initialization */
   app_postprocess_init(&s_fd_pp_params, network_fd_ctx);
 
+  uint64_t conf_threshold = 40;
+  (void)sysobj_params_read(PARAM_CONF_THRESHOLD, &conf_threshold,
+                           &was_default);
+  app_pipeline_set_conf_threshold((uint32_t)conf_threshold);
+
   /* Set target FPS to drive the camera capture */
   uint64_t target_fps = 30;
-  sysobj_params_read(PARAM_TARGET_FPS, &target_fps, NULL);
+  (void)sysobj_params_read(PARAM_TARGET_FPS, &target_fps, &was_default);
   s_interframe_ms = 1000 / (uint32_t)target_fps;
 
   /* Initialize queues */

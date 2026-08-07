@@ -32,6 +32,8 @@ int CAM_NNPipe_UpdateAddress(uint8_t *nn_pipe_dst);
 
 int CAM_GetVencWidth(void);
 int CAM_GetVencHeight(void);
+void CAM_NnToDisplayPoint(float *x, float *y);
+void CAM_NnToDisplaySize(float *width, float *height);
 
 /**
  * @brief Stop PIPE2, reconfigure to a new resolution, and restart.

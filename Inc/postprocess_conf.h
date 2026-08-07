@@ -24,7 +24,7 @@
 #define AI_FD_PP_GRID_HEIGHT               (32)
 
 /* Tuning — can be modified by the application */
-#define AI_FD_PP_CONF_THRESHOLD            (0.5f)
+#define AI_FD_PP_CONF_THRESHOLD            (0.4f)
 #define AI_FD_PP_IOU_THRESHOLD             (0.3f)
 #define AI_FD_PP_MAX_BOXES_LIMIT           (10)
 

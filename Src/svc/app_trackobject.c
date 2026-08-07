@@ -27,6 +27,7 @@
 
 static float score_matrix[APP_MAX_OBJECT_TRACKING][APP_MAX_OBJECT_DETECT];
 static TrackObject_s track_objects[APP_MAX_OBJECT_TRACKING];
+static float start_confidence_threshold = APP_START_TRACKING_CONF_THRESHOLD;
 
 static void to_recognize(TrackObject_s *o, const float *features)
 {
@@ -72,7 +73,7 @@ static void to_init(od_pp_outBuffer_t *dbox, float *features)
   static int tracking_id = 0;
   TrackObject_s *o = to_find_free();
 
-  if (dbox->conf < APP_START_TRACKING_CONF_THRESHOLD)
+  if (dbox->conf < start_confidence_threshold)
   {
     return ;
   }
@@ -259,6 +260,15 @@ void TrackObject_UpdateAll(od_pp_out_t *pp_out, float reid_features[APP_MAX_OBJE
 {
   compute_score_matrix(pp_out, reid_features);
   assign_or_create(pp_out, reid_features);
+}
+
+void TrackObject_SetStartConfidence(float threshold)
+{
+  if (threshold < 0.0f)
+    threshold = 0.0f;
+  else if (threshold > 1.0f)
+    threshold = 1.0f;
+  start_confidence_threshold = threshold;
 }
 
 void TrackObject_DisplayIterator_Init(TO_DisplayIterator_s *it)

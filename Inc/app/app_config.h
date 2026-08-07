@@ -45,7 +45,7 @@
  * Maximum: PARAMS_MAX_ENTRIES (15).
  */
 typedef enum {
-  PARAM_CONF_THRESHOLD = 0, /*!< uint32, default=50,  range [0,  100] – detection confidence % */
+  PARAM_CONF_THRESHOLD = 0, /*!< uint32, default=40,  range [0,  100] – detection confidence % */
   PARAM_BRIGHTNESS     = 1, /*!< uint32, default=80,  range [0,  100] – display brightness %   */
   PARAM_TARGET_FPS     = 2, /*!< uint32, default=30,  range [1,   60] – target frame rate       */
   PARAM_FACE_INPUT_MODE = 3, /*!< uint32: 0=camera, 1=embedded known-face fixture */

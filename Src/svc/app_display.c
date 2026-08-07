@@ -19,6 +19,7 @@
 #include "svc/app_display.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -49,8 +50,15 @@
 #define CONF_LEVEL_FONT font_16
 #define INF_INFO_FONT font_16
 #define OBJ_RECT_COLOR   0xffffffff
-#define LANDMARK_COLOR   0xff00ff00  /* green landmark dots */
-#define LANDMARK_DOT_SZ  5
+#define ROTATED_RECT_COLOR 0xff00d8ff
+#define BOX_PADDING_PERCENT 12
+#define ROTATED_CORNER_FRACTION 0.24f
+#define ROTATED_CORNER_POINTS   7
+#define ROTATED_POINT_SIZE      5
+#define EYE_LANDMARK_COLOR      0xff00ff00
+#define NOSE_LANDMARK_COLOR     0xffffff00
+#define MOUTH_LANDMARK_COLOR    0xffff4fff
+#define LANDMARK_DOT_SZ         7
 #if defined(APP_OUTPUT_UVC)
 #define VENC_OUT_BUFFER_SIZE (255 * 1024)
 #endif
@@ -541,6 +549,10 @@ static void cvt_nn_box_to_dp_box(od_pp_outBuffer_t *detect, box_t *box_dp) {
 
   convert_point(detect->x_center, detect->y_center, &xc, &yc);
   convert_length(detect->width, detect->height, &w, &h);
+  /* CenterFace predicts a tight facial-region box. Pad each side for a more
+   * natural HUD box without changing detection, tracking, or FaceID input. */
+  w += 2 * MAX(2, w * BOX_PADDING_PERCENT / 100);
+  h += 2 * MAX(2, h * BOX_PADDING_PERCENT / 100);
   x0 = xc - (w + 1) / 2;
   y0 = yc - (h + 1) / 2;
   x1 = xc + (w + 1) / 2;
@@ -574,18 +586,104 @@ static void draw_track_box(uint8_t *p_buffer, TrackObject_s *track) {
   }
 }
 
+static void draw_rotated_segment(uint8_t *p_buffer, float x0, float y0,
+                                 float x1, float y1)
+{
+  for (int i = 0; i < ROTATED_CORNER_POINTS; i++) {
+    float t = (float)i / (float)(ROTATED_CORNER_POINTS - 1);
+    int x = (int)(x0 + (x1 - x0) * t + 0.5f) - ROTATED_POINT_SIZE / 2;
+    int y = (int)(y0 + (y1 - y0) * t + 0.5f) - ROTATED_POINT_SIZE / 2;
+    x = MAX(0, MIN(x, VENC_WIDTH - ROTATED_POINT_SIZE));
+    y = MAX(0, MIN(y, VENC_HEIGHT - ROTATED_POINT_SIZE));
+    DRAW_FillArgbHw(p_buffer, VENC_WIDTH, VENC_HEIGHT, x, y,
+                    ROTATED_POINT_SIZE, ROTATED_POINT_SIZE,
+                    ROTATED_RECT_COLOR);
+  }
+}
+
+static void draw_rotated_corner(uint8_t *p_buffer, float corner_x,
+                                float corner_y, float previous_x,
+                                float previous_y, float next_x, float next_y)
+{
+  float previous_arm_x = corner_x +
+      (previous_x - corner_x) * ROTATED_CORNER_FRACTION;
+  float previous_arm_y = corner_y +
+      (previous_y - corner_y) * ROTATED_CORNER_FRACTION;
+  float next_arm_x = corner_x +
+      (next_x - corner_x) * ROTATED_CORNER_FRACTION;
+  float next_arm_y = corner_y +
+      (next_y - corner_y) * ROTATED_CORNER_FRACTION;
+
+  draw_rotated_segment(p_buffer, corner_x, corner_y,
+                       previous_arm_x, previous_arm_y);
+  draw_rotated_segment(p_buffer, corner_x, corner_y,
+                       next_arm_x, next_arm_y);
+}
+
+static void draw_rotated_face_box(
+    uint8_t *p_buffer, od_pp_outBuffer_t *detect,
+    const float lm[FACE_NB_LANDMARKS * 2])
+{
+  box_t box;
+  float eye_dx;
+  float eye_dy;
+  float eye_norm;
+  float cosine;
+  float sine;
+  float cx;
+  float cy;
+  float half_w;
+  float half_h;
+  float corner_x[4];
+  float corner_y[4];
+  static const float local_sign[4][2] = {
+    {-1.0f, -1.0f}, {1.0f, -1.0f},
+    {1.0f, 1.0f}, {-1.0f, 1.0f}
+  };
+
+  /* CenterFace landmark order starts with left and right eye. Their vector
+   * supplies roll without requiring atan2/sin/cos at display time. */
+  eye_dx = (lm[2] - lm[0]) * VENC_WIDTH;
+  eye_dy = (lm[3] - lm[1]) * VENC_HEIGHT;
+  eye_norm = sqrtf(eye_dx * eye_dx + eye_dy * eye_dy);
+  if (eye_norm < 2.0f)
+    return;
+  cosine = eye_dx / eye_norm;
+  sine = eye_dy / eye_norm;
+
+  cvt_nn_box_to_dp_box(detect, &box);
+  cx = (float)box.x + (float)box.w * 0.5f;
+  cy = (float)box.y + (float)box.h * 0.5f;
+  half_w = (float)box.w * 0.5f;
+  half_h = (float)box.h * 0.5f;
+
+  for (int i = 0; i < 4; i++) {
+    float local_x = local_sign[i][0] * half_w;
+    float local_y = local_sign[i][1] * half_h;
+    corner_x[i] = cx + local_x * cosine - local_y * sine;
+    corner_y[i] = cy + local_x * sine + local_y * cosine;
+  }
+  for (int i = 0; i < 4; i++)
+    draw_rotated_corner(p_buffer, corner_x[i], corner_y[i],
+                        corner_x[(i + 3) % 4], corner_y[(i + 3) % 4],
+                        corner_x[(i + 1) % 4], corner_y[(i + 1) % 4]);
+}
+
 static void draw_face_landmarks(uint8_t *p_buffer,
                                 const float lm[FACE_NB_LANDMARKS * 2])
 {
   for (int k = 0; k < FACE_NB_LANDMARKS; k++) {
     int px, py;
+    uint32_t color = k < 2 ? EYE_LANDMARK_COLOR :
+                     k == 2 ? NOSE_LANDMARK_COLOR :
+                              MOUTH_LANDMARK_COLOR;
     convert_point(lm[2 * k], lm[2 * k + 1], &px, &py);
     int x0 = px - LANDMARK_DOT_SZ / 2;
     int y0 = py - LANDMARK_DOT_SZ / 2;
     clamp_point(&x0, &y0);
     DRAW_FillArgbHw(p_buffer, VENC_WIDTH, VENC_HEIGHT,
                     x0, y0, LANDMARK_DOT_SZ, LANDMARK_DOT_SZ,
-                    LANDMARK_COLOR);
+                    color);
   }
 }
 
@@ -702,6 +800,7 @@ static void build_display(uint8_t *p_buffer, od_pp_out_t *pp_out,
 
   /* Draw landmark points for all detected faces this frame */
   for (int i = 0; i < nb_faces; i++) {
+    draw_rotated_face_box(p_buffer, &pp_out->pOutBuff[i], landmarks[i]);
     draw_face_landmarks(p_buffer, landmarks[i]);
   }
 

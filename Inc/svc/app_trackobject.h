@@ -44,6 +44,7 @@ typedef struct
 } TO_DisplayIterator_s;
 
 void TrackObject_UpdateAll(od_pp_out_t *pp_out, float reid_features[APP_MAX_OBJECT_DETECT][NN_REID_NB_FEATURES]);
+void TrackObject_SetStartConfidence(float threshold);
 void TrackObject_DisplayIterator_Init(TO_DisplayIterator_s *it);
 TrackObject_s * TrackObject_DisplayIterator_GetNext(TO_DisplayIterator_s *it);
 

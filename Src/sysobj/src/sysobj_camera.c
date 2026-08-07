@@ -28,6 +28,11 @@ static int sensor_height;
 static int venc_width;
 static int venc_height;
 static int sensor_mirror_flip = CMW_MIRRORFLIP_NONE;
+static CMW_Manual_roi_area_t display_roi;
+static float nn_display_scale_x = 1.0f;
+static float nn_display_scale_y = 1.0f;
+static float nn_display_offset_x;
+static float nn_display_offset_y;
 
 static const char *sensor_names[] = {
   "CMW_UNKNOWN",
@@ -93,6 +98,26 @@ static void CAM_InitCropConfig(CMW_Manual_roi_area_t *roi, int sensor_w, int sen
   roi->offset_y = (sensor_h - roi->height + 1) / 2;
 }
 
+/* CenterFace was trained with square images. Use the centered square contained
+ * by the display ROI, then retain its position for mapping detections back to
+ * the wide display frame without stretching faces in the 128x128 tensor. */
+static void CAM_InitNnCropConfig(CMW_Manual_roi_area_t *roi)
+{
+  uint32_t side = MIN(display_roi.width, display_roi.height);
+
+  roi->width = side;
+  roi->height = side;
+  roi->offset_x = display_roi.offset_x + (display_roi.width - side) / 2U;
+  roi->offset_y = display_roi.offset_y + (display_roi.height - side) / 2U;
+
+  nn_display_scale_x = (float)side / (float)display_roi.width;
+  nn_display_scale_y = (float)side / (float)display_roi.height;
+  nn_display_offset_x = (float)(roi->offset_x - display_roi.offset_x) /
+                        (float)display_roi.width;
+  nn_display_offset_y = (float)(roi->offset_y - display_roi.offset_y) /
+                        (float)display_roi.height;
+}
+
 static void DCMIPP_PipeInitDisplay(int sensor_w, int sensor_h)
 {
   CMW_DCMIPP_Conf_t dcmipp_conf;
@@ -108,7 +133,8 @@ static void DCMIPP_PipeInitDisplay(int sensor_w, int sensor_h)
   dcmipp_conf.mode = CMW_Aspect_ratio_manual_roi;
   dcmipp_conf.enable_swap = 0;
   dcmipp_conf.enable_gamma_conversion = 0;
-  CAM_InitCropConfig(&dcmipp_conf.manual_conf, sensor_w, sensor_h);
+  CAM_InitCropConfig(&display_roi, sensor_w, sensor_h);
+  dcmipp_conf.manual_conf = display_roi;
   ret = CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE1, &dcmipp_conf, &hw_pitch);
   assert(ret == HAL_OK);
   assert(hw_pitch == dcmipp_conf.output_width * dcmipp_conf.output_bpp);
@@ -127,7 +153,9 @@ static void DCMIPP_PipeInitNn(int sensor_w, int sensor_h)
   dcmipp_conf.mode = CMW_Aspect_ratio_manual_roi;
   dcmipp_conf.enable_swap = 1;
   dcmipp_conf.enable_gamma_conversion = 0;
-  CAM_InitCropConfig(&dcmipp_conf.manual_conf, sensor_w, sensor_h);
+  (void)sensor_w;
+  (void)sensor_h;
+  CAM_InitNnCropConfig(&dcmipp_conf.manual_conf);
   ret = CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE2, &dcmipp_conf, &hw_pitch);
   assert(ret == HAL_OK);
   assert(hw_pitch == dcmipp_conf.output_width * dcmipp_conf.output_bpp);
@@ -233,7 +261,7 @@ void CAM_NNPipe_Reconfigure(uint16_t width, uint16_t height,
   dcmipp_conf.mode          = CMW_Aspect_ratio_manual_roi;
   dcmipp_conf.enable_swap   = 1;
   dcmipp_conf.enable_gamma_conversion = 0;
-  CAM_InitCropConfig(&dcmipp_conf.manual_conf, sensor_width, sensor_height);
+  CAM_InitNnCropConfig(&dcmipp_conf.manual_conf);
   ret = CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE2, &dcmipp_conf, &hw_pitch);
   assert(ret == HAL_OK);
   assert(hw_pitch == (uint32_t)width * dcmipp_conf.output_bpp);
@@ -282,6 +310,18 @@ int CAM_GetVencHeight(void)
   assert(venc_height);
 
   return venc_height;
+}
+
+void CAM_NnToDisplayPoint(float *x, float *y)
+{
+  *x = nn_display_offset_x + *x * nn_display_scale_x;
+  *y = nn_display_offset_y + *y * nn_display_scale_y;
+}
+
+void CAM_NnToDisplaySize(float *width, float *height)
+{
+  *width *= nn_display_scale_x;
+  *height *= nn_display_scale_y;
 }
 
 

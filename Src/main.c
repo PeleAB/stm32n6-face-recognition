@@ -160,10 +160,12 @@ void sysobj_uart_handle_config_param_write(uint8_t src_id, uint16_t param_id,
   (void)type; /* type is informational; sysobj_params uses the table type */
   params_status_t st = sysobj_params_write(param_id, value);
 
-  /* Debug input selection is a live control.  Apply a valid value even if
+  /* Runtime controls apply immediately. A valid value is applied even if
    * persistence fails; the response still reports the flash error. */
   if (param_id == PARAM_FACE_INPUT_MODE && value <= FACE_INPUT_STATIC)
     app_pipeline_set_face_input_mode((uint32_t)value);
+  else if (param_id == PARAM_CONF_THRESHOLD && value <= 100U)
+    app_pipeline_set_conf_threshold((uint32_t)value);
 
   uint8_t payload[3];
   payload[0] = (uint8_t)st;

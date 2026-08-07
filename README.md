@@ -222,6 +222,21 @@ when no selection is supplied by a non-CMake build system. The LCD build sends
 camera frames and the same detection/recognition HUD directly to the board's
 LTDC display and does not initialize USB video streaming.
 
+The HUD uses a padded white tracking box and cyan corner brackets rotated from
+the detected eye line. Landmark colors identify their role in face alignment:
+green for the eyes, yellow for the nose, and magenta for the mouth corners.
+Detection confidence defaults to 40%; changing **Conf. Threshold** in the
+desktop viewer applies immediately and persists across reboots.
+
+CenterFace receives an undistorted 128x128 view of the centered square inside
+the displayed camera ROI. Its coordinates are mapped back into the wide video
+frame for the HUD. MobileFaceNet keeps the five-landmark canonical alignment,
+but samples it with bilinear interpolation from a synchronized high-resolution
+RGB565 snapshot instead of enlarging the 128x128 detector input. Faces outside
+the centered square are intentionally outside the detector field of view.
+Re-enroll gallery identities after changing between these preprocessing paths;
+embeddings produced by different crop pipelines should not be mixed.
+
 In LCD mode, tap **GALLERY** in the top-right corner to manage identities
 without a host computer. **NEW PERSON** opens an on-screen keyboard; enter a
 name, tap **START**, and keep one face in view while the sample counter fills.

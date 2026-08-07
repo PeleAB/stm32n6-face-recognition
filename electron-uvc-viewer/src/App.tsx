@@ -31,7 +31,7 @@ import {
 // Param definitions — must match app_config.h app_param_id_t enum order
 // ---------------------------------------------------------------------------
 const PARAM_DEFS = [
-  { id: 0, name: 'Conf. Threshold', unit: '%',   min: 0,  max: 100, defaultVal: 50  },
+  { id: 0, name: 'Conf. Threshold', unit: '%',   min: 0,  max: 100, defaultVal: 40  },
   { id: 1, name: 'Brightness',      unit: '%',   min: 0,  max: 100, defaultVal: 80  },
   { id: 2, name: 'Target FPS',      unit: 'fps', min: 1,  max: 60,  defaultVal: 30  },
 ] as const;
