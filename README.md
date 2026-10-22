@@ -24,6 +24,26 @@ This top readme gives an overview of the app. Additional documentation is availa
 - [Application overview](Doc/Application-Overview.md)
 - [Boot Overview](Doc/Boot-Overview.md)
 - [Camera build options](Doc/Build-Options.md)
+- [Offline Windows build and flashing](Doc/Offline-Windows.md)
+
+## Portable firmware on Windows
+
+Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/export-offline.ps1`
+to create `offline-package/STM32N6`, including firmware sources and a complete
+STM32CubeCLT tool installation. Copy that folder to the offline PC, then run:
+
+```powershell
+.\build-windows.cmd -CheckOnly
+.\build-windows.cmd
+.\flash-windows.cmd -All -DryRun
+.\flash-windows.cmd -All
+```
+
+Use `-Preset Debug-LCD` for LCD output. The default is USB UVC. Put the board
+in DEV mode before flashing, then select flash boot and power cycle afterward.
+See the [offline guide](Doc/Offline-Windows.md) for drivers, tool selection and
+transfer verification. No Edge AI installation is needed to build the existing
+generated models.
 
 ---
 
@@ -154,19 +174,25 @@ You can see application messages by attaching a console application to the ST-Li
 
 ---
 
-## Quickstart using prebuilt binaries
+## Program the Current Face-Recognition Firmware
 
-### Flash Prebuilt Binaries
+### Flash Bootloader, Models and Application
 
-Three binaries must be programmed in the board's external flash using the following procedure:
+Build the current application with `build-windows.cmd`, then program these
+images using `flash-windows.cmd -All` or the CubeProgrammer UI:
 
 1. Set the board to [development mode](#boot-modes).
 2. Program `Binary/ai_fsbl.hex` (to be done once) (First stage boot loader).
-3. Program `Binary/network_data.hex` (parameters of the networks; to be changed only when the network is changed).
-4. Program `Binary/x-cube-n6-ai-h264-usb-uvc.hex` (firmware application).
+3. Program `Model/fd_data.hex` and `Model/faceid_data.hex` (both models' weights; update when models change).
+4. Program `build/Debug/Project_sign.bin` at `0x70100000` (signed firmware application; use the matching preset directory).
 5. Set the board to [boot from flash mode](#boot-modes).
 6. Power cycle the board.
 7. [Launch the React/Electron viewer](#reactelectron-viewer).
+
+The prebuilt `Binary/network_data.hex` and
+`Binary/x-cube-n6-ai-h264-usb-uvc.hex` are legacy demo images, not this current
+face-recognition firmware. `Project.hex` is linked for RAM and must not be
+substituted for the signed application at the external-flash boot address.
 
 ---
 
@@ -187,19 +213,22 @@ export DKEL="<STM32CubeProgrammer_N6 Install Folder>/bin/ExternalLoader/MX66UW1G
 STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el $DKEL -hardRst -w Binary/ai_fsbl.hex
 
 # Network Parameters and Biases
-STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el $DKEL -hardRst -w Binary/network_data.hex
+STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el $DKEL -w Model/fd_data.hex -v
+STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el $DKEL -w Model/faceid_data.hex -v
 
 # Application Firmware
-STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el $DKEL -hardRst -w Binary/x-cube-n6-ai-h264-usb-uvc.hex
+STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el $DKEL -w build/Debug/Project_sign.bin 0x70100000 -v
 ```
 
 ---
 
 ## Quickstart Using Source Code
 
-Before building and running the application, you have to program `network_data.hex` (model weights and biases).
+Before running the application, program both `Model/fd_data.hex` and
+`Model/faceid_data.hex` (model weights and biases).
 
-This step only has to be done once unless you change the AI model. See [Quickstart Using Prebuilt Binaries](#quickstart-using-prebuilt-binaries) for details.
+This step only has to be done once unless you change the AI models. See
+[Program the Current Face-Recognition Firmware](#program-the-current-face-recognition-firmware).
 
 More information about boot modes is available in the [Boot Overview](Doc/Boot-Overview.md).
 
@@ -209,7 +238,7 @@ Set your board to [development mode](#boot-modes).
 
 #### VSCode + STM32Cube Extension (CMake)
 
-1. Install STM32CubeCLT (for `cube-cmake` and the GNU toolchain) and the STM32Cube extension for VSCode.
+1. Prepare the [offline Windows package](Doc/Offline-Windows.md) or install STM32CubeCLT. The supplied Windows build tasks use the same scripts as `build-windows.cmd`; debugging additionally requires the STM32Cube extension for VSCode.
 2. Choose the compile-time video output and configure it:
    - USB UVC (default): `cmake --preset Debug`
    - On-board 800x480 LCD: `cmake --preset Debug-LCD`
@@ -319,7 +348,9 @@ export DKEL="<STM32CubeProgrammer_N6 Install Folder>/bin/ExternalLoader/MX66UW1G
 STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -el $DKEL -hardRst -w build/Project_sign.bin 0x70100000
 ```
 
-__Note__: Only the application binary needs to be programmed if `fsbl` and `network_data.hex` have already been programmed.
+__Note__: Only the application binary needs to be programmed if the FSBL and
+both current model images have already been programmed. CMake already creates
+`Project_sign.bin`; no additional manual signing is needed for CMake builds.
 
 Set your board to [boot from flash](#boot-modes) mode and power cycle to boot from external flash.
 

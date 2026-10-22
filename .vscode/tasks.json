@@ -1,78 +1,84 @@
 {
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "CMake Configure (Debug UVC)",
-            "type": "shell",
-            "command": "cmake",
-            "args": [
-                "-S",
-                ".",
-                "-B",
-                "build/Debug",
-                "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/gcc-arm-none-eabi.cmake",
-                "-DCMAKE_BUILD_TYPE=Debug",
-                "-DAPP_DISPLAY_OUTPUT=UVC",
-                "-G",
-                "Ninja"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": []
-        },
-        {
-            "label": "CMake Build (Debug UVC)",
-            "type": "shell",
-            "command": "cmake",
-            "args": [
-                "--build",
-                "build/Debug"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": "$gcc",
-            "dependsOn": "CMake Configure (Debug UVC)",
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            }
-        },
-        {
-            "label": "CMake Configure (Debug LCD)",
-            "type": "shell",
-            "command": "cmake",
-            "args": [
-                "-S",
-                ".",
-                "-B",
-                "build/Debug-LCD",
-                "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/gcc-arm-none-eabi.cmake",
-                "-DCMAKE_BUILD_TYPE=Debug",
-                "-DAPP_DISPLAY_OUTPUT=LCD",
-                "-G",
-                "Ninja"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": []
-        },
-        {
-            "label": "CMake Build (Debug LCD)",
-            "type": "shell",
-            "command": "cmake",
-            "args": [
-                "--build",
-                "build/Debug-LCD"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": "$gcc",
-            "dependsOn": "CMake Configure (Debug LCD)",
-            "group": "build"
-        }
-    ]
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake Configure (Debug UVC)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/tools/build-windows.ps1",
+        "-Preset",
+        "Debug",
+        "-ConfigureOnly"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake Build (Debug UVC)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/tools/build-windows.ps1",
+        "-Preset",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$gcc",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "CMake Configure (Debug LCD)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/tools/build-windows.ps1",
+        "-Preset",
+        "Debug-LCD",
+        "-ConfigureOnly"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CMake Build (Debug LCD)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/tools/build-windows.ps1",
+        "-Preset",
+        "Debug-LCD"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$gcc",
+      "group": "build"
+    }
+  ]
 }

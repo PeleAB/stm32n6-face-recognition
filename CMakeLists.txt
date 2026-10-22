@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.22)
-include(ExternalProject)
 
 #
 # This file is generated only once,
@@ -43,7 +42,12 @@ set(N6PLAT_LIB_ROOT "${CMAKE_SOURCE_DIR}/Lib"             CACHE PATH "Path to Li
 # Pass project-specific config headers (FreeRTOSConfig.h, stm32n6xx_hal_conf.h, etc.)
 set(N6PLAT_INC_EXTRA "${CMAKE_SOURCE_DIR}/Inc")
 
-add_subdirectory(../n6-platform n6-platform-build)
+# Keep the platform sources with the project so a folder copy builds offline.
+set(N6_PLATFORM_DIR "${CMAKE_SOURCE_DIR}/Lib/n6-platform" CACHE PATH "Path to n6-platform sources")
+if(NOT EXISTS "${N6_PLATFORM_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "Missing n6-platform: copy the complete Lib/n6-platform directory with this project.")
+endif()
+add_subdirectory("${N6_PLATFORM_DIR}" n6-platform-build)
 
 # ---------------------------------------------------------------------------
 # Include CubeMX-generated build rules (defines the app executable target)

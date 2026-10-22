@@ -1,3 +1,6 @@
 build
 mx.scratch
+offline-package/
+tools/STM32CubeCLT/
+offline-manifest.json
 !.settings

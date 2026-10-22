@@ -16,9 +16,11 @@ set(USBX_ROOT "${CUBE_FW}/Middlewares/ST/usbx")
 string(REPLACE "-T \"${CMAKE_SOURCE_DIR}/\"" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
 
 # Signing tool (can be overridden via -DSTM32_SIGNING_TOOL_HINT=... or -DSTM32_SIGNING_TOOL=...).
-set(STM32_SIGNING_TOOL_HINT "C:/ST/STM32CubeCLT_1.18.0/STM32CubeProgrammer/bin" CACHE PATH "Hint path to STM32_SigningTool_CLI.exe")
-find_program(STM32_SIGNING_TOOL STM32_SigningTool_CLI.exe
-    PATHS "${STM32_SIGNING_TOOL_HINT}" "${STM32_SIGNING_TOOL_HINT}/bin"
+set(STM32_SIGNING_TOOL_HINT "$ENV{STM32_PROGRAMMER_ROOT}" CACHE PATH "STM32CubeProgrammer root or bin directory")
+find_program(STM32_SIGNING_TOOL NAMES STM32_SigningTool_CLI STM32_SigningTool_CLI.exe
+    HINTS "${STM32_SIGNING_TOOL_HINT}" "${STM32_SIGNING_TOOL_HINT}/bin"
+          "${PROJECT_ROOT}/tools/STM32CubeCLT/STM32CubeProgrammer/bin"
+          "$ENV{STM32_CUBE_CLT}/STM32CubeProgrammer/bin"
     PATH_SUFFIXES bin
 )
 if(NOT STM32_SIGNING_TOOL)
@@ -230,8 +232,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${LIB_ROOT}/AI_Runtime/Inc
     ${LIB_ROOT}/AI_Runtime/Npu/ll_aton
     ${LIB_ROOT}/AI_Runtime/Npu/Devices/STM32N6XX
-    C:/ST/STEdgeAI/4.0/Middlewares/ST/AI/Inc
-    C:/ST/STEdgeAI/4.0/Middlewares/ST/AI/Npu/ll_aton
     ${LIB_ROOT}/Camera_Middleware
     ${LIB_ROOT}/Camera_Middleware/sensors
     ${LIB_ROOT}/Camera_Middleware/sensors/imx335
@@ -333,6 +333,7 @@ add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
         ${PROJECT_BINARY_DIR}/Project.hex
         ${PROJECT_BINARY_DIR}/Project_sign.bin
     COMMENT "Generating bin/hex artifacts"
+    VERBATIM
 )
 
 
